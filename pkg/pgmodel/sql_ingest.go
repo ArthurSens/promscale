@@ -315,6 +315,7 @@ func (p *pgxInserter) getMetricInserter(metric string) chan insertDataRequest {
 type insertHandler struct {
 	conn               pgxConn
 	input              chan insertDataRequest
+	epochAbort         chan struct{}
 	pending            *pendingBuffer
 	seriesCache        map[string]SeriesID
 	seriesCacheEpoch   Epoch
@@ -351,8 +352,9 @@ var pendingBuffers = sync.Pool{
 }
 
 type copyRequest struct {
-	data  *pendingBuffer
-	table string
+	data       *pendingBuffer
+	table      string
+	epochAbort chan struct{}
 }
 
 func runInserterRoutine(conn pgxConn, input chan insertDataRequest, metricName string, completeMetricCreationSignal chan struct{}, metricTableNames MetricCache, toCopiers chan copyRequest) {
@@ -378,6 +380,7 @@ func runInserterRoutine(conn pgxConn, input chan insertDataRequest, metricName s
 	handler := insertHandler{
 		conn:             conn,
 		input:            input,
+		epochAbort:       make(chan struct{}, 1),
 		pending:          pendingBuffers.Get().(*pendingBuffer),
 		seriesCache:      make(map[string]SeriesID),
 		seriesCacheEpoch: -1,
@@ -462,6 +465,8 @@ func (h *insertHandler) blockingHandleReq() bool {
 			return true
 		case <-h.seriesCacheRefresh.C:
 			h.refreshSeriesCache()
+		case <-h.epochAbort:
+			h.refreshSeriesCache()
 		}
 	}
 }
@@ -529,7 +534,7 @@ func (h *insertHandler) flushPending() {
 
 	h.pending.addEpoch(epoch)
 
-	h.toCopiers <- copyRequest{h.pending, h.metricTableName}
+	h.toCopiers <- copyRequest{h.pending, h.metricTableName, h.epochAbort}
 	h.pending = pendingBuffers.Get().(*pendingBuffer)
 }
 
@@ -576,6 +581,20 @@ func tryRecovery(conn pgxConn, req copyRequest, err error) error {
 	if !ok {
 		errMsg := err.Error()
 		log.Warn("msg", fmt.Sprintf("unexpected error while inserting to %s", req.table), "err", errMsg)
+		return err
+	}
+
+	// if there was an epoch abort, notify the requester that they should update
+	// their cache
+	if pgErr.Code == "PS001" {
+		// notify the requester that they should update their cache.
+		// this _must never block_: since it is a back edge blocking will cause
+		// deadlocks
+		// TODO should we also return the data so it INSERT can be retried?
+		select {
+		case req.epochAbort <- struct{}{}:
+		default:
+		}
 		return err
 	}
 
