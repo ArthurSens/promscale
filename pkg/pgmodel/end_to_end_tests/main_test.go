@@ -31,6 +31,7 @@ var (
 	useExtension      = flag.Bool("use-extension", true, "use the promscale extension")
 	useTimescaleDB    = flag.Bool("use-timescaledb", true, "use TimescaleDB")
 	useTimescale2     = flag.Bool("use-timescale2", false, "use TimescaleDB 2.0")
+	useMultinode      = flag.Bool("use-multinode", false, "use TimescaleDB 2.0 Multinode")
 	printLogs         = flag.Bool("print-logs", false, "print TimescaleDB logs")
 	extendedTest      = flag.Bool("extended-test", false, "run extended testing dataset and PromQL queries")
 
@@ -49,10 +50,33 @@ func TestMain(m *testing.M) {
 		if !testing.Short() {
 			var err error
 
+			var closer io.Closer
 			if *useDocker {
+				var extensionState testhelpers.ExtensionState
+				if *useExtension {
+					extensionState.UsePromscale()
+				}
+
+				if *useTimescaleDB {
+					extensionState.UseTimescaleDB()
+				}
+
+				if *useTimescale2 {
+					extensionState.UseTimescale2()
+				}
+
+				if *useMultinode {
+					extensionState.UseMultinode()
+				}
+
 				pgContainerTestDataDir = generatePGTestDirFiles()
 
-				pgContainer, err = testhelpers.StartPGContainer(ctx, *useExtension, *useTimescaleDB, *useTimescale2, pgContainerTestDataDir, *printLogs)
+				pgContainer, closer, err = testhelpers.StartPGContainer(
+					ctx,
+					extensionState,
+					pgContainerTestDataDir,
+					*printLogs,
+				)
 				if err != nil {
 					fmt.Println("Error setting up container", err)
 					os.Exit(1)
@@ -75,13 +99,8 @@ func TestMain(m *testing.M) {
 					panic(err)
 				}
 
-				if *useDocker {
-					if *printLogs {
-						_ = pgContainer.StopLogProducer()
-					}
-
-					_ = pgContainer.Terminate(ctx)
-					pgContainer = nil
+				if closer != nil {
+					_ = closer.Close()
 				}
 				err = promCont.Terminate(ctx)
 				if err != nil {
