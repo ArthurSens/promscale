@@ -110,6 +110,8 @@ var (
 
 	pgHost          = "localhost"
 	pgPort nat.Port = "5432/tcp"
+
+	multinode = false
 )
 
 type SuperuserStatus = bool
@@ -148,35 +150,90 @@ func GetReadOnlyConnection(t testing.TB, DBName string) *pgxpool.Pool {
 }
 
 func DbSetup(DBName string, superuser SuperuserStatus) (*pgxpool.Pool, error) {
-	db, err := pgx.Connect(context.Background(), PgConnectURL(defaultDB, Superuser))
+	defaultDb, err := pgx.Connect(context.Background(), PgConnectURL(defaultDB, Superuser))
+	if err != nil {
+		return nil, err
+	}
+	err = func() error {
+		_, err = defaultDb.Exec(context.Background(), fmt.Sprintf("DROP DATABASE IF EXISTS %s", DBName))
+		if err != nil {
+			return err
+		}
+
+		if multinode {
+			dropDistributed := "CALL distributed_exec($$ DROP DATABASE IF EXISTS %s $$, transactional => false)"
+			_, err = defaultDb.Exec(context.Background(), fmt.Sprintf(dropDistributed, DBName))
+			if err != nil {
+				return err
+			}
+		}
+
+		_, err = defaultDb.Exec(context.Background(), fmt.Sprintf("CREATE DATABASE %s OWNER %s", DBName, promUser))
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}()
+
+	if err != nil {
+		_ = defaultDb.Close(context.Background())
+		return nil, err
+	}
+
+	err = defaultDb.Close(context.Background())
 	if err != nil {
 		return nil, err
 	}
 
-	_, err = db.Exec(context.Background(), fmt.Sprintf("DROP DATABASE IF EXISTS %s", DBName))
+	ourDb, err := pgx.Connect(context.Background(), PgConnectURL(DBName, Superuser))
 	if err != nil {
 		return nil, err
 	}
 
-	_, err = db.Exec(context.Background(), fmt.Sprintf("CREATE DATABASE %s OWNER %s", DBName, promUser))
+	err = func() error {
+		if !multinode {
+			// some docker images may have timescaledb installed in a template,
+			// but we want to tes our own timescale installation.
+			// Multinode requires the administrator to set up data nodes, so in
+			// that case timescaledb should always be installed by the time the
+			// connector runs
+			_, err = ourDb.Exec(context.Background(), "DROP EXTENSION IF EXISTS timescaledb")
+			if err != nil {
+				return err
+			}
+		} else {
+			_, err = ourDb.Exec(context.Background(), "SELECT add_data_node('dn0', host => 'db5433', port => 5433);")
+			if err != nil {
+				return err
+			}
+
+			_, err = ourDb.Exec(context.Background(), "SELECT add_data_node('dn1', host => 'db5434', port => 5434);")
+			if err != nil {
+				return err
+			}
+
+			_, err = ourDb.Exec(context.Background(), "GRANT USAGE ON FOREIGN SERVER dn0, dn1 TO "+promUser)
+			if err != nil {
+				return err
+			}
+
+			grantDistributed := "CALL distributed_exec($$ GRANT ALL ON DATABASE %s TO %s $$, transactional => false)"
+			_, err = ourDb.Exec(context.Background(), fmt.Sprintf(grantDistributed, DBName, promUser))
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}()
+
 	if err != nil {
+		_ = ourDb.Close(context.Background())
 		return nil, err
 	}
 
-	err = db.Close(context.Background())
-	if err != nil {
-		return nil, err
-	}
-
-	//some docker images may have timescaledb installed in a template, which we don't always want
-	dbDrop, err := pgx.Connect(context.Background(), PgConnectURL(DBName, Superuser))
-	if err != nil {
-		return nil, err
-	}
-	if _, err = dbDrop.Exec(context.Background(), "DROP EXTENSION IF EXISTS timescaledb"); err != nil {
-		return nil, err
-	}
-	if err = dbDrop.Close(context.Background()); err != nil {
+	if err = ourDb.Close(context.Background()); err != nil {
 		return nil, err
 	}
 
@@ -234,7 +291,7 @@ func StartPGContainerWithImage(ctx context.Context,
 	extensionState ExtensionState,
 ) (testcontainers.Container, io.Closer, error) {
 
-	multinode := extensionState.usesMultinode()
+	multinode = extensionState.usesMultinode()
 
 	c := CloseAll{}
 	var networks []string
@@ -275,6 +332,7 @@ func StartPGContainerWithImage(ctx context.Context,
 		req.Cmd = []string{
 			"-c", "max_connections=100",
 			"-c", "port=" + containerPort.Port(),
+			"-c", "max_prepared_transactions=150",
 			"-i",
 		}
 
@@ -434,12 +492,18 @@ func StartPGContainerWithImage(ctx context.Context,
 			return nil, nil, err
 		}
 
+		_, err = db.Exec(context.Background(), "GRANT USAGE ON FOREIGN SERVER dn0, dn1 TO "+promUser)
+		if err != nil {
+			return nil, nil, err
+		}
+
 		err = db.Close(context.Background())
 		if err != nil {
 			c.Close()
 			return nil, nil, err
 		}
 	}
+
 	return container, c, nil
 }
 

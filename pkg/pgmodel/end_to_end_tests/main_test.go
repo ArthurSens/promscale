@@ -128,19 +128,38 @@ func withDB(t testing.TB, DBName string, f func(db *pgxpool.Pool, t testing.TB))
 }
 
 func performMigrate(t testing.TB, connectURL string, superConnectURL string) {
+	migrateURL := connectURL
 	if *useTimescaleDB {
-		migrateURL := connectURL
-		if !*useExtension {
-			//The docker image without an extension does not have pgextwlist
-			//Thus, you have to use the superuser to install TimescaleDB
+		if !*useExtension /*|| *useMultinode*/ {
+			// The docker image without an extension does not have pgextwlist
+			// Thus, you have to use the superuser to install TimescaleDB
+			// Multinode also requires superuser in order to have permissions to
+			// set up on data nodes
 			migrateURL = superConnectURL
 		}
 		err := pgmodel.MigrateTimescaleDBExtension(migrateURL)
 		if err != nil {
 			t.Fatal(err)
 		}
+		// if *useMultinode {
+		// 	db, err := pgxpool.Connect(context.Background(), superConnectURL)
+		// 	_, err = db.Exec(context.Background(), "SELECT add_data_node('dn0', host => 'db5433', port => 5433);")
+		// 	if err != nil {
+		// 		db.Close()
+		// 		t.Fatal(err)
+		// 	}
+
+		// 	_, err = db.Exec(context.Background(), "SELECT add_data_node('dn1', host => 'db5434', port => 5434);")
+		// 	if err != nil {
+		// 		db.Close()
+		// 		t.Fatal(err)
+		// 	}
+		// 	db.Close()
+		// }
 	}
-	migratePool, err := pgxpool.Connect(context.Background(), connectURL)
+
+	// remote config currently requires superuser
+	migratePool, err := pgxpool.Connect(context.Background(), migrateURL)
 	if err != nil {
 		t.Fatal(err)
 	}
