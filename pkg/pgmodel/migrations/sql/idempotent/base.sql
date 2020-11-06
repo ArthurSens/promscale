@@ -80,6 +80,7 @@ AS $proc$
 DECLARE
     r RECORD;
     created boolean;
+    is_distributed boolean = false;
 BEGIN
     FOR r IN
         SELECT *
@@ -100,7 +101,17 @@ BEGIN
         END IF;
 
         IF SCHEMA_CATALOG.is_timescaledb_installed() AND SCHEMA_CATALOG.get_default_compression_setting() THEN
-            PERFORM SCHEMA_PROM.set_compression_on_metric_table(r.table_name, TRUE);
+            IF SCHEMA_CATALOG.get_timescale_major_version() >= 2 THEN
+                BEGIN
+                    SELECT count(*) > 0 FROM timescaledb_information.data_nodes
+                    INTO is_distributed;
+                EXCEPTION WHEN SQLSTATE '42P01' THEN -- Timescale 1.x, never distributed
+                END;
+            END IF;
+            -- TODO custom compression
+            IF NOT is_distributed THEN
+                PERFORM SCHEMA_PROM.set_compression_on_metric_table(r.table_name, TRUE);
+            END IF;
         END IF;
 
         --do this before taking exclusive lock to minimize work after taking lock
@@ -135,6 +146,7 @@ CREATE OR REPLACE FUNCTION SCHEMA_CATALOG.make_metric_table()
     AS $func$
 DECLARE
   label_id INT;
+  is_distributed BOOLEAN = false;
 BEGIN
    EXECUTE format('CREATE TABLE SCHEMA_DATA.%I(time TIMESTAMPTZ NOT NULL, value DOUBLE PRECISION NOT NULL, series_id BIGINT NOT NULL)',
                     NEW.table_name);
@@ -142,9 +154,24 @@ BEGIN
                     NEW.id, NEW.table_name);
 
     IF SCHEMA_CATALOG.is_timescaledb_installed() THEN
-        PERFORM create_hypertable(format('SCHEMA_DATA.%I', NEW.table_name), 'time',
+        BEGIN
+            SELECT count(*) > 0 FROM timescaledb_information.data_nodes
+            INTO is_distributed;
+        EXCEPTION WHEN SQLSTATE '42P01' THEN -- Timescale 1.x, never distributed
+        END;
+        IF is_distributed THEN
+            PERFORM create_distributed_hypertable(
+                format('SCHEMA_DATA.%I', NEW.table_name),
+                'time',
+                chunk_time_interval=>SCHEMA_CATALOG.get_staggered_chunk_interval(SCHEMA_CATALOG.get_default_chunk_interval()),
+                create_default_indexes=>false
+            );
+        ELSE
+            RAISE EXCEPTION 'non distributed';
+            PERFORM create_hypertable(format('SCHEMA_DATA.%I', NEW.table_name), 'time',
             chunk_time_interval=>SCHEMA_CATALOG.get_staggered_chunk_interval(SCHEMA_CATALOG.get_default_chunk_interval()),
                              create_default_indexes=>false);
+        END IF;
     END IF;
 
     SELECT SCHEMA_CATALOG.get_or_create_label_id('__name__', NEW.metric_name)
