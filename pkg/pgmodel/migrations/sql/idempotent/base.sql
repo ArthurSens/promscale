@@ -167,7 +167,6 @@ BEGIN
                 create_default_indexes=>false
             );
         ELSE
-            RAISE EXCEPTION 'non distributed';
             PERFORM create_hypertable(format('SCHEMA_DATA.%I', NEW.table_name), 'time',
             chunk_time_interval=>SCHEMA_CATALOG.get_staggered_chunk_interval(SCHEMA_CATALOG.get_default_chunk_interval()),
                              create_default_indexes=>false);
