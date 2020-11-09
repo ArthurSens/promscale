@@ -19,9 +19,13 @@ DO $$
                 END
             $inner$;
         $dist$);
-    EXCEPTION WHEN SQLSTATE '0A000' THEN
-        -- we're not the access node, just return
-        RETURN;
+    EXCEPTION
+        WHEN undefined_function THEN
+            -- we're not on Timescale 2, just return
+            RETURN;
+        WHEN SQLSTATE '0A000' THEN
+            -- we're not the access node, just return
+            RETURN;
     END
 $$;
 
@@ -47,17 +51,25 @@ DO $$
                 END
             $inner$;
         $dist$);
-    EXCEPTION WHEN SQLSTATE '0A000' THEN
-        -- we're not the access node, just return
-        RETURN;
+    EXCEPTION
+        WHEN undefined_function THEN
+            -- we're not on Timescale 2, just return
+            RETURN;
+        WHEN SQLSTATE '0A000' THEN
+            -- we're not the access node, just return
+            RETURN;
     END
 $$;
 
 DO $$
     BEGIN
         CALL distributed_exec($dist$ GRANT prom_reader TO prom_writer; $dist$);
-    EXCEPTION WHEN SQLSTATE '0A000' THEN
-        -- we're not the access node, just return
-        RETURN;
+    EXCEPTION
+        WHEN undefined_function THEN
+            -- we're not on Timescale 2, just return
+            RETURN;
+        WHEN SQLSTATE '0A000' THEN
+            -- we're not the access node, just return
+            RETURN;
     END
 $$;

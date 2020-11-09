@@ -97,9 +97,13 @@ DO $$
                ALTER DEFAULT PRIVILEGES IN SCHEMA SCHEMA_INFO GRANT SELECT ON TABLES TO prom_reader;
             END $inner$;
         $dist$);
-    EXCEPTION WHEN SQLSTATE '0A000' THEN
-        -- we're not the access node, just return
-        RETURN;
+    EXCEPTION
+        WHEN undefined_function THEN
+            -- we're not on Timescale 2, just return
+            RETURN;
+        WHEN SQLSTATE '0A000' THEN
+            -- we're not the access node, just return
+            RETURN;
     END
 $$;
 
