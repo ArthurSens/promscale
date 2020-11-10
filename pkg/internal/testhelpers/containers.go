@@ -308,7 +308,7 @@ func StartPGContainerWithImage(ctx context.Context,
 		if err != nil {
 			return nil, nil, err
 		}
-		c.Append(func() { network.Remove(context.Background()) })
+		c.Append(func() { _ = network.Remove(context.Background()) })
 		networks = []string{networkName}
 	}
 
